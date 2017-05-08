@@ -14,13 +14,13 @@ class LSTM:
                             "f:b" : init_weights([self.hidden_size], type = 'ones'),
                             "i:x" : init_weights([self.inp_size, self.hidden_size]),
                             "i:h" : init_weights([self.hidden_size, self.hidden_size]),
-                            "i:b" : init_weights([self.hidden_size]),
+                            "i:b" : init_weights([self.hidden_size], type = 'zeros'),
                             "o:x" : init_weights([self.inp_size, self.hidden_size]),
                             "o:h" : init_weights([self.hidden_size, self.hidden_size]),
-                            "o:b" : init_weights([self.hidden_size]),
+                            "o:b" : init_weights([self.hidden_size], type = 'zeros'),
                             "c:x" : init_weights([self.inp_size, self.hidden_size]),
                             "c:h" : init_weights([self.hidden_size, self.hidden_size]),
-                            "c:b" : init_weights([self.hidden_size]),
+                            "c:b" : init_weights([self.hidden_size], type = 'zeros'),
                        }
 
     def get_weights(self):
@@ -50,6 +50,9 @@ class LSTM:
 def init_weights(shape, type = 'regular'):
     if type == 'ones':
         return theano.shared(np.array(np.ones(shape), dtype=np.float32))
+    elif type == 'zeros':
+        return theano.shared(np.array(np.zeros(shape), dtype=np.float32))
+
     else:
         return theano.shared(np.array(np.random.randn(*shape) * 0.01, dtype=np.float32))
 
@@ -58,6 +61,7 @@ def RMSprop(cost, params, lr=0.01, rho=0.9, epsilon=1e-6):
     updates = []
 
     for p, g in zip(params, grads):
+        g = T.clip(g, -1, 1)
         acc = theano.shared(p.get_value() * 0.)
         acc_new = rho * acc + (1 - rho) * g ** 2
 
@@ -79,7 +83,7 @@ def pad(x, length):
     return x + ' ' * (length - len(x))
 
 def main():
-    truncate = 25
+    truncate = 50
     epochs = 100
 
     text = open("file.txt", 'rb').read()
@@ -120,18 +124,21 @@ def main():
                                             sequences = hidden_1,
                                             outputs_info = [init_hidden_2, init_cell_2])
 
-    distributions = T.nnet.softmax(T.dot(hidden_2, fc_param[0]))
-    loss = T.sum(T.nnet.categorical_crossentropy(distributions, targets))
+    t = T.dot(hidden_2, fc_param[0])
+    distributions = T.nnet.softmax(t)
+    loss = T.mean(T.nnet.categorical_crossentropy(distributions, targets))
 
     updates = RMSprop(cost = loss, params = fc_param + lstm_1.get_weights() + lstm_2.get_weights(), lr = lr)
 
-    train = theano.function(inputs = [inp, targets, init_hidden_1, init_cell_1, init_hidden_2, init_cell_2, lr], outputs = [loss, distributions, hidden_1[-1], cell_1[-1], hidden_2[-1], cell_2[-1]], updates = updates)
+    train = theano.function(inputs = [inp, targets, init_hidden_1, init_cell_1, init_hidden_2, init_cell_2, lr], outputs = [t, loss, distributions, hidden_1[-1], cell_1[-1], hidden_2[-1], cell_2[-1]], updates = updates)
 
     sample = theano.function(inputs = [inp, init_hidden_1, init_cell_1, init_hidden_2, init_cell_2], outputs = [distributions, hidden_1[-1], cell_1[-1], hidden_2[-1], cell_2[-1]])
 
     # ------------------- MODEL -------------------
 
-    learning_rate = 1e-3
+    learning_rate = 2e-3
+
+    from tqdm import *
 
     for epoch in range (epochs):
         hidden_1 = np.zeros([512]).astype(np.float32)
@@ -140,7 +147,13 @@ def main():
         cell_2 = np.zeros([512]).astype(np.float32)
         f = None
         for timestep in range (0, len(text), truncate):
-            if timestep % (500 * truncate) == 0:
+            if timestep % (100 * truncate) == 0:
+                hidden_1 = np.zeros([512]).astype(np.float32)
+                cell_1 = np.zeros([512]).astype(np.float32)
+                hidden_2 = np.zeros([512]).astype(np.float32)
+                cell_2 = np.zeros([512]).astype(np.float32)
+
+            if timestep % (1000 * truncate) == 0:
                 f = open("Record_" + str(timestep), 'wb')
                 seed = np.zeros([vocab_size]).astype(np.float32)
                 seed[np.random.randint(0, vocab_size)] = 1
@@ -150,7 +163,7 @@ def main():
                 h2 = np.zeros([512]).astype(np.float32)
                 c2 = np.zeros([512]).astype(np.float32)
 
-                for i in range (1000):
+                for i in tqdm(range (10000)):
                     d, h1, c1, h2, c2 = sample(seed.reshape([1, vocab_size]), h1, c1, h2, c2)
                     seed_ = np.random.choice([_ for _ in range (vocab_size)], p = d[0])
                     seed = np.zeros([vocab_size]).astype(np.float32)
@@ -175,13 +188,16 @@ def main():
                 targets.append(onehot)
 
             if timestep < (truncate * 40):
-                loss, generated_text, hidden_1, cell_1, hidden_2, cell_2 = train(inp, targets, hidden_1, cell_1, hidden_2, cell_2, learning_rate/10.)
+                t, loss, generated_text, hidden_1, cell_1, hidden_2, cell_2 = train(inp, targets, hidden_1, cell_1, hidden_2, cell_2, learning_rate/10.)
             else:
-                loss, generated_text, hidden_1, cell_1, hidden_2, cell_2 = train(inp, targets, hidden_1, cell_1, hidden_2, cell_2, learning_rate)
+                t, loss, generated_text, hidden_1, cell_1, hidden_2, cell_2 = train(inp, targets, hidden_1, cell_1, hidden_2, cell_2, learning_rate)
 
             reconstruction = ''
             #print generated_text
             for l in generated_text:
                 reconstruction += index_to_char[np.argmax(l)]
-            print "epoch " + str(pad(epoch, 3)) + ' | batch - ' + pad(timestep/truncate, 5) + ' / ' + pad(len(text) / truncate, 5) + ' | loss - ' + hard_round(loss, 3) + " | generated_text - " + reconstruction
+
+            if timestep % (truncate * 5) == 0:
+                print np.round(t, 3)
+                print "epoch " + str(pad(epoch, 3)) + ' | batch - ' + pad(timestep/truncate, 5) + ' / ' + pad(len(text) / truncate, 5) + ' | loss - ' + hard_round(loss, 3) + " | generated_text - " + reconstruction
 main()
